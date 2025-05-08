@@ -46,4 +46,4 @@ http://[서버IP주소]:5050
 - Python 3.6 이상
 - PyTorch
 - OpenCV
-- CUDA (GPU 가속 사용 시) 
+- CUDA (GPU 가속 사용 시)
