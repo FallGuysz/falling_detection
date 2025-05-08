@@ -30,12 +30,6 @@ frames by hand for training ST-GCN model.
 
 ## Basic Use
 
-1. Download all pre-trained models into ./Models folder.
-2. Run main.py
-
-```
-    python main.py ${video file or camera source}
-```
 
 ## Reference
 
