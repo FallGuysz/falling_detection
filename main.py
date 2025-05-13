@@ -233,6 +233,7 @@ if __name__ == '__main__':
             center = track.get_center().astype(int)
 
             action = 'pending..'
+            action_name = 'pending..'  # 기본값으로 변수 초기화
             clr = (0, 255, 0)
             # Use 30 frames time-steps to prediction.
             if len(track.keypoints_list) == 30:
@@ -250,7 +251,12 @@ if __name__ == '__main__':
             # VISUALIZE.
             if track.time_since_update == 0:
                 if args.show_skeleton:
-                    frame = draw_single(frame, track.keypoints_list[-1])
+                    if action_name == 'Fall Down':
+                        # Fall Down 상황에서는 빨간색 스켈레톤 사용
+                        frame = draw_single(frame, track.keypoints_list[-1], skeleton_color=(255, 0, 0))
+                    else:
+                        # 기본 색상(노란색) 사용
+                        frame = draw_single(frame, track.keypoints_list[-1])
                 frame = cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 0), 1)
                 frame = cv2.putText(frame, str(track_id), (center[0], center[1]), cv2.FONT_HERSHEY_COMPLEX,
                                     0.4, (255, 0, 0), 2)

@@ -5,13 +5,12 @@ import math
 import torch
 import numpy as np
 
-RED = (0, 0, 255)
-GREEN = (0, 255, 0)
-BLUE = (255, 0, 0)
-CYAN = (255, 255, 0)
-YELLOW = (0, 255, 255)
-ORANGE = (0, 165, 255)
-PURPLE = (255, 0, 255)
+RED = (255, 0, 0)
+BLUE = (0, 0, 255)
+YELLOW = (0, 255, 0)
+
+# 통일된 스켈레톤 색상 (BGR 형식)
+SKELETON_COLOR = YELLOW  # 노란색
 
 """COCO_PAIR = [(0, 1), (0, 2), (1, 3), (2, 4),  # Head
              (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
@@ -19,12 +18,10 @@ PURPLE = (255, 0, 255)
              (11, 13), (12, 14), (13, 15), (14, 16)]"""
 COCO_PAIR = [(0, 13), (1, 2), (1, 3), (3, 5), (2, 4), (4, 6), (13, 7), (13, 8),  # Body
              (7, 9), (8, 10), (9, 11), (10, 12)]
-POINT_COLORS = [(0, 255, 255), (0, 191, 255), (0, 255, 102), (0, 77, 255), (0, 255, 0),  # Nose, LEye, REye, LEar, REar
-                (77, 255, 255), (77, 255, 204), (77, 204, 255), (191, 255, 77), (77, 191, 255), (191, 255, 77),  # LShoulder, RShoulder, LElbow, RElbow, LWrist, RWrist
-                (204, 77, 255), (77, 255, 204), (191, 77, 255), (77, 255, 191), (127, 77, 255), (77, 255, 127), (0, 255, 255)]  # LHip, RHip, LKnee, Rknee, LAnkle, RAnkle, Neck
-LINE_COLORS = [(0, 215, 255), (0, 255, 204), (0, 134, 255), (0, 255, 50), (77, 255, 222),
-               (77, 196, 255), (77, 135, 255), (191, 255, 77), (77, 255, 77), (77, 222, 255),
-               (255, 156, 127), (0, 127, 255), (255, 127, 77), (0, 77, 255), (255, 77, 36)]
+# 모든 점에 동일한 색상 적용
+POINT_COLORS = [SKELETON_COLOR] * 17
+# 모든 선에 동일한 색상 적용
+LINE_COLORS = [SKELETON_COLOR] * 15
 
 MPII_PAIR = [(8, 9), (11, 12), (11, 10), (2, 1), (1, 0), (13, 14), (14, 15), (3, 4), (4, 5),
              (8, 7), (7, 6), (6, 2), (6, 3), (8, 12), (8, 13)]
@@ -93,14 +90,27 @@ def collate_fn_list(batch):
     return img, inp, im_name
 
 
-def draw_single(frame, pts, joint_format='coco'):
+def draw_single(frame, pts, joint_format='coco', skeleton_color=None):
     if joint_format == 'coco':
         l_pair = COCO_PAIR
-        p_color = POINT_COLORS
-        line_color = LINE_COLORS
+        if skeleton_color is not None:
+            # 사용자 지정 색상 사용
+            p_color = [skeleton_color] * 17
+            line_color = [skeleton_color] * 15
+        else:
+            # 기본 색상 사용
+            p_color = POINT_COLORS
+            line_color = LINE_COLORS
     elif joint_format == 'mpii':
         l_pair = MPII_PAIR
-        p_color = [PURPLE, BLUE, BLUE, RED, RED, BLUE, BLUE, RED, RED, PURPLE, PURPLE, PURPLE, RED, RED,BLUE,BLUE]
+        if skeleton_color is not None:
+            # 사용자 지정 색상 사용
+            p_color = [skeleton_color] * 16
+            line_color = [skeleton_color] * 15
+        else:
+            # 기본 색상 사용
+            p_color = [SKELETON_COLOR] * 16
+            line_color = [SKELETON_COLOR] * 15
     else:
         NotImplementedError
 
@@ -135,7 +145,8 @@ def vis_frame_fast(frame, im_res, joint_format='coco'):
         line_color = LINE_COLORS
     elif joint_format == 'mpii':
         l_pair = MPII_PAIR
-        p_color = [PURPLE, BLUE, BLUE, RED, RED, BLUE, BLUE, RED, RED, PURPLE, PURPLE, PURPLE, RED, RED,BLUE,BLUE]
+        p_color = [SKELETON_COLOR] * 16
+        line_color = [SKELETON_COLOR] * 15
     else:
         NotImplementedError
 
@@ -177,8 +188,8 @@ def vis_frame(frame, im_res, joint_format='coco'):
         line_color = LINE_COLORS
     elif joint_format == 'mpii':
         l_pair = MPII_PAIR
-        p_color = [PURPLE, BLUE, BLUE, RED, RED, BLUE, BLUE, RED, RED, PURPLE, PURPLE, PURPLE, RED, RED, BLUE, BLUE]
-        line_color = [PURPLE, BLUE, BLUE, RED, RED, BLUE, BLUE, RED, RED, PURPLE, PURPLE, RED, RED, BLUE, BLUE]
+        p_color = [SKELETON_COLOR] * 16
+        line_color = [SKELETON_COLOR] * 15
     else:
         raise NotImplementedError
 

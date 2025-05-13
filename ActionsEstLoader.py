@@ -14,7 +14,7 @@ class TSSTG(object):
     """
     def __init__(self,
                  weight_file='./Models/TSSTG/tsstg-model.pth',
-                 device='cpu'):
+                 device='cuda'):
         self.graph_args = {'strategy': 'spatial'}
         self.class_names = ['Standing', 'Walking', 'Sitting', 'Lying Down',
                             'Stand up', 'Sit down', 'Fall Down']

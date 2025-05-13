@@ -39,7 +39,7 @@ class CamLoader:
         while not self.ret:
             time.sleep(0.1)
             c += 1
-            if c > 20:
+            if c > 50:
                 self.stop()
                 raise TimeoutError('Can not get a frame from camera!!!')
         return self

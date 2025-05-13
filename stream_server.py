@@ -14,6 +14,7 @@ from ActionsEstLoader import TSSTG
 import torch
 import numpy as np
 from fn import draw_single
+import datetime
 
 app = Flask(__name__)
 
@@ -22,6 +23,16 @@ global_frame = None
 frame_lock = threading.Lock()
 resize_fn = None  # 전역 변수로 선언
 args = None  # 명령줄 인수 저장을 위한 전역 변수
+
+# 이미지 저장 설정
+IMAGE_SAVE_DIR = 'fall_images'
+
+# 초기화 함수
+def init_app():
+    # 이미지 저장 디렉토리 생성
+    if not os.path.exists(IMAGE_SAVE_DIR):
+        os.makedirs(IMAGE_SAVE_DIR)
+        print(f"이미지 저장 디렉토리 생성 완료: {IMAGE_SAVE_DIR}")
 
 def image_resize(image, width=None, height=None, inter=cv2.INTER_AREA):
     dim = None
@@ -91,6 +102,9 @@ def process_video(camera_source, device='cuda'):
         fps_time = 0
         f = 0
         
+        # 낙상 감지 상태 추적용 변수
+        fall_states = {}  # track_id를 키로 하는 딕셔너리
+        
         print("비디오 처리 시작")
         # 첫 프레임이 로드되었는지 확인
         if not cam.grabbed():
@@ -145,36 +159,82 @@ def process_video(camera_source, device='cuda'):
             # 트래커 업데이트
             tracker.update(detections)
             
+            # 현재 액티브한 트랙 ID 저장
+            active_tracks = set()
+            
             # 각 트랙의 행동 예측
             for i, track in enumerate(tracker.tracks):
                 if not track.is_confirmed():
                     continue
                     
                 track_id = track.track_id
+                active_tracks.add(track_id)
                 bbox = track.to_tlbr().astype(int)
                 center = track.get_center().astype(int)
                 
                 action = 'pending..'
+                action_name = 'pending..'  # 기본값으로 변수 초기화
                 clr = (0, 255, 0)
+                confidence = 0
                 
                 # 30프레임 단위로 행동 예측
                 if len(track.keypoints_list) == 30:
                     pts = np.array(track.keypoints_list, dtype=np.float32)
                     out = action_model.predict(pts, frame.shape[:2])
                     action_name = action_model.class_names[out[0].argmax()]
-                    action = '{}: {:.2f}%'.format(action_name, out[0].max() * 100)
+                    confidence = out[0].max() * 100
+                    action = '{}: {:.2f}%'.format(action_name, confidence)
                     
                     if action_name == 'Fall Down':
                         clr = (255, 0, 0)
                         event = "Fall Down"
+                        
+                        # 낙상 상태 추적 시작 또는 업데이트
+                        if track_id not in fall_states:
+                            fall_states[track_id] = {
+                                'start_time': time.time(),
+                                'is_saved': False,
+                                'confidence': confidence
+                            }
+                        else:
+                            # 이미 추적 중이면 상태 업데이트
+                            fall_states[track_id]['confidence'] = max(
+                                fall_states[track_id]['confidence'], 
+                                confidence
+                            )
+                            
+                        # 3초 이상 낙상 상태 지속 확인 및 이미지 저장
+                        fall_duration = time.time() - fall_states[track_id]['start_time']
+                        
+                        if fall_duration >= 3.0 and not fall_states[track_id]['is_saved']:
+                            # 현재 시간으로 파일명 생성
+                            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                            img_filename = f"{IMAGE_SAVE_DIR}/fall_{track_id}_{timestamp}.jpg"
+                            
+                            # 이미지 저장
+                            cv2.imwrite(img_filename, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                            
+                            # 저장 상태 업데이트
+                            fall_states[track_id]['is_saved'] = True
+                            print(f"낙상 감지! 트랙 ID: {track_id}, 지속 시간: {fall_duration:.2f}초, 이미지 저장됨: {img_filename}")
+                    
                     elif action_name == 'Lying Down':
                         clr = (255, 200, 0)
                         event = "Lying Down"
+                    else:
+                        # 다른 행동이면 낙상 추적 초기화
+                        if track_id in fall_states:
+                            del fall_states[track_id]
                 
                 # 시각화 - 안전하게 처리
                 try:
                     if len(track.keypoints_list) > 0:
-                        frame = draw_single(frame, track.keypoints_list[-1])
+                        if action_name == 'Fall Down':
+                            # Fall Down 상황에서는 빨간색 스켈레톤 사용
+                            frame = draw_single(frame, track.keypoints_list[-1], skeleton_color=(0, 0, 255))
+                        else:
+                            # 기본 색상(노란색) 사용
+                            frame = draw_single(frame, track.keypoints_list[-1])
                     
                     # 좌표가 유효한지 확인
                     x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
@@ -185,8 +245,20 @@ def process_video(camera_source, device='cuda'):
                                        0.4, (255, 0, 0), 2)
                     frame = cv2.putText(frame, action, (x1 + 5, y1 + 15), cv2.FONT_HERSHEY_COMPLEX,
                                        0.4, clr, 1)
+                    
+                    # 낙상 지속 시간 표시 (낙상 감지 중인 경우)
+                    if track_id in fall_states and not fall_states[track_id]['is_saved']:
+                        duration = time.time() - fall_states[track_id]['start_time']
+                        duration_text = f"낙상 지속: {duration:.1f}초"
+                        frame = cv2.putText(frame, duration_text, (x1 + 5, y1 + 35), 
+                                          cv2.FONT_HERSHEY_COMPLEX, 0.4, (255, 0, 0), 1)
                 except (ValueError, TypeError, IndexError) as e:
                     print(f"트랙 시각화 오류: {e}")
+            
+            # 현재 프레임에 없는 트랙 ID 제거 (더 이상 감지되지 않는 객체)
+            for track_id in list(fall_states.keys()):
+                if track_id not in active_tracks:
+                    del fall_states[track_id]
             
             # 프레임 크기 조정 및 FPS 표시
             frame = cv2.resize(frame, (0, 0), fx=2., fy=2.)
@@ -320,6 +392,9 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     print(f"서버 시작: 카메라={args.camera}, 장치={args.device}, 포트={args.port}")
+    
+    # 앱 초기화
+    init_app()
     
     # 비디오 처리 스레드 시작
     video_thread = threading.Thread(target=process_video, args=(args.camera, args.device))
