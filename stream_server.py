@@ -54,10 +54,14 @@ def image_resize(image, width=None, height=None, inter=cv2.INTER_AREA):
 def preproc(image):
     """preprocess function for CameraLoader."""
     global resize_fn
+    # Ensure we are working with a copy before resize_fn
+    current_image = image.copy()
     if resize_fn is not None:
-        image = resize_fn(image)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    return image
+        current_image = resize_fn(current_image) # Pass the copy to resize_fn
+    
+    # cvtColor 자체가 새 이미지 객체를 반환하므로 추가 copy는 불필요할 수 있음
+    final_image = cv2.cvtColor(current_image, cv2.COLOR_BGR2RGB)
+    return final_image
 
 def kpt2bbox(kpt, ex=20):
     """Get bbox that hold on all of the keypoints (x,y)"""
@@ -77,8 +81,8 @@ def process_video(camera_source, device='cuda'):
         inp_pose = (192, 128)
         pose_model = SPPE_FastPose('resnet50', inp_pose[0], inp_pose[1], device=device)
         
-        # Tracker 초기화
-        tracker = Tracker(max_age=30, n_init=3)
+        # Tracker 초기화 - max_age를 300으로 늘림
+        tracker = Tracker(max_age=300, n_init=3)
         
         # 행동 인식 모델
         action_model = TSSTG(device=device)
@@ -120,160 +124,144 @@ def process_video(camera_source, device='cuda'):
         
         while cam.grabbed():
             f += 1
-            frame = cam.getitem()
-            image = frame.copy()
+            source_frame = cam.getitem()  # 원본 프레임
+            frame_to_draw_on = source_frame.copy() # 그리기용 복사본
+
+            # 객체 감지 - source_frame 사용
+            detected_for_pose_estimation_input = detect_model.detect(source_frame, need_resize=False, expand_bb=10)
             
-            # 객체 감지
-            detected = detect_model.detect(frame, need_resize=False, expand_bb=10)
-            
-            # 트래킹 예측
             tracker.predict()
             
-            # 이전 트랙 정보 추가
-            for track in tracker.tracks:
-                det = torch.tensor([track.to_tlbr().tolist() + [0.5, 1.0, 0.0]], dtype=torch.float32)
-                detected = torch.cat([detected, det], dim=0) if detected is not None else det
+            # Recreating the `detected_for_pose_estimation` tensor (previously named 'detected')
+            # This combines model detections with tracker predictions for pose input
+            current_pose_input_tensor = detected_for_pose_estimation_input # Start with model detections
             
-            detections = []
-            event = ""
+            temp_track_detections = []
+            for track_item_for_pose in tracker.tracks:
+                # Use a compatible device for the tensor
+                device_for_tensor = current_pose_input_tensor.device if current_pose_input_tensor is not None else 'cpu'
+                track_as_detection_tensor = torch.tensor([track_item_for_pose.to_tlbr().tolist() + [0.5, 1.0, 0.0]], dtype=torch.float32, device=device_for_tensor)
+                temp_track_detections.append(track_as_detection_tensor)
+
+            if temp_track_detections:
+                all_track_detections_tensor = torch.cat(temp_track_detections, dim=0)
+                if current_pose_input_tensor is not None:
+                    current_pose_input_tensor = torch.cat([current_pose_input_tensor, all_track_detections_tensor], dim=0)
+                else:
+                    current_pose_input_tensor = all_track_detections_tensor
             
-            if detected is not None:
-                # 스켈레톤 포즈 예측
-                poses = pose_model.predict(frame, detected[:, 0:4], detected[:, 4])
+            detections_for_tracker_update = []
+            if current_pose_input_tensor is not None:
+                # 스켈레톤 포즈 예측 - source_frame 사용
+                poses = pose_model.predict(source_frame, current_pose_input_tensor[:, 0:4], current_pose_input_tensor[:, 4])
                 
-                # 객체 생성
-                detections = [Detection(kpt2bbox(ps['keypoints'].numpy()),
+                detections_for_tracker_update = [Detection(kpt2bbox(ps['keypoints'].numpy()),
                                     np.concatenate((ps['keypoints'].numpy(),
                                                   ps['kp_score'].numpy()), axis=1),
                                     ps['kp_score'].mean().numpy()) for ps in poses]
-                
-                # 감지된 객체 시각화
-                for bb in detected[:, 0:5]:
-                    # 좌표가 유효한지 확인
-                    try:
-                        x1, y1, x2, y2 = int(bb[0]), int(bb[1]), int(bb[2]), int(bb[3])
-                        frame = cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
-                    except (ValueError, TypeError) as e:
-                        print(f"경계 상자 그리기 오류: {e}, 값: {bb[0:4]}")
             
-            # 트래커 업데이트
-            tracker.update(detections)
+            tracker.update(detections_for_tracker_update)
             
-            # 현재 액티브한 트랙 ID 저장
             active_tracks = set()
-            
-            # 각 트랙의 행동 예측
-            for i, track in enumerate(tracker.tracks):
-                if not track.is_confirmed():
-                    continue
+            # event는 루프 시작 시 또는 객체 없을 때 초기화
+            if not tracker.tracks: 
+                frame_to_draw_on = source_frame.copy() # 객체 없으면 원본(RGB)으로 초기화
+                event = ""
+            else:
+                # event = "" # 루프 내에서 설정됨
+                pass # 트랙이 있으면 이전 frame_to_draw_on (복사된 원본)을 계속 사용
+
+            # 객체가 있을 때만 트랙별 그리기 수행
+            if tracker.tracks:
+                for i, track in enumerate(tracker.tracks):
+                    if not track.is_confirmed():
+                        continue
+                    active_tracks.add(track.track_id)
+                    track_id = track.track_id # track_id 명시적 할당
                     
-                track_id = track.track_id
-                active_tracks.add(track_id)
-                bbox = track.to_tlbr().astype(int)
-                center = track.get_center().astype(int)
-                
-                action = 'pending..'
-                action_name = 'pending..'  # 기본값으로 변수 초기화
-                clr = (0, 255, 0)
-                confidence = 0
-                
-                # 30프레임 단위로 행동 예측
-                if len(track.keypoints_list) == 30:
-                    pts = np.array(track.keypoints_list, dtype=np.float32)
-                    out = action_model.predict(pts, frame.shape[:2])
-                    action_name = action_model.class_names[out[0].argmax()]
-                    confidence = out[0].max() * 100
-                    action = '{}: {:.2f}%'.format(action_name, confidence)
+                    bbox = track.to_tlbr().astype(int)
+                    # center = track.get_center().astype(int) # 현재 사용 안함
+                    action = 'pending..'
+                    action_name = 'pending..'
+                    clr = (0, 255, 0)  # RGB Green
+                    # event = "" # 루프 시작시 초기화
+                    confidence = 0
                     
-                    if action_name == 'Fall Down':
-                        clr = (255, 0, 0)
-                        event = "Fall Down"
+                    if len(track.keypoints_list) == 30:
+                        pts = np.array(track.keypoints_list, dtype=np.float32)
+                        out = action_model.predict(pts, source_frame.shape[:2]) 
+                        predicted_action_name = action_model.class_names[out[0].argmax()]
+                        if predicted_action_name in action_model.class_names:
+                            action_name = predicted_action_name
+                        confidence = out[0].max() * 100
+                        action = action_name
                         
-                        # 낙상 상태 추적 시작 또는 업데이트
+                    if action_name == 'Fall Down':
+                        clr = (255, 0, 0)  # RGB Red
+                        event = "Fall Down"
                         if track_id not in fall_states:
                             fall_states[track_id] = {
-                                'start_time': time.time(),
-                                'is_saved': False,
-                                'confidence': confidence
+                                'start_time': time.time(), 'is_saved': False, 'confidence': confidence
                             }
                         else:
-                            # 이미 추적 중이면 상태 업데이트
-                            fall_states[track_id]['confidence'] = max(
-                                fall_states[track_id]['confidence'], 
-                                confidence
-                            )
-                            
-                        # 3초 이상 낙상 상태 지속 확인 및 이미지 저장
-                        fall_duration = time.time() - fall_states[track_id]['start_time']
+                            fall_states[track_id]['confidence'] = max(fall_states[track_id]['confidence'], confidence)
                         
-                        if fall_duration >= 3.0 and not fall_states[track_id]['is_saved']:
-                            # 현재 시간으로 파일명 생성
+                        fall_duration = time.time() - fall_states[track_id]['start_time']
+                        if fall_duration >= 7.0 and not fall_states[track_id]['is_saved']:
                             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                             img_filename = f"{IMAGE_SAVE_DIR}/fall_{track_id}_{timestamp}.jpg"
-                            
-                            # 이미지 저장
-                            cv2.imwrite(img_filename, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                            
-                            # 저장 상태 업데이트
+                            cv2.imwrite(img_filename, cv2.cvtColor(frame_to_draw_on, cv2.COLOR_RGB2BGR))
                             fall_states[track_id]['is_saved'] = True
                             print(f"낙상 감지! 트랙 ID: {track_id}, 지속 시간: {fall_duration:.2f}초, 이미지 저장됨: {img_filename}")
                     
                     elif action_name == 'Lying Down':
-                        clr = (255, 200, 0)
                         event = "Lying Down"
-                    else:
-                        # 다른 행동이면 낙상 추적 초기화
-                        if track_id in fall_states:
-                            del fall_states[track_id]
-                
-                # 시각화 - 안전하게 처리
-                try:
-                    if len(track.keypoints_list) > 0:
-                        if action_name == 'Fall Down':
-                            # Fall Down 상황에서는 빨간색 스켈레톤 사용
-                            frame = draw_single(frame, track.keypoints_list[-1], skeleton_color=(0, 0, 255))
-                        else:
-                            # 기본 색상(노란색) 사용
-                            frame = draw_single(frame, track.keypoints_list[-1])
+                        if track_id in fall_states: del fall_states[track_id]
+                    else: 
+                        action = action_name # 'pending..'이 아닌 경우, event는 없음
+                        if track_id in fall_states: del fall_states[track_id]
                     
-                    # 좌표가 유효한지 확인
-                    x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
-                    cx, cy = int(center[0]), int(center[1])
-                    
-                    frame = cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
-                    frame = cv2.putText(frame, str(track_id), (cx, cy), cv2.FONT_HERSHEY_COMPLEX,
-                                       0.4, (255, 0, 0), 2)
-                    frame = cv2.putText(frame, action, (x1 + 5, y1 + 15), cv2.FONT_HERSHEY_COMPLEX,
-                                       0.4, clr, 1)
-                    
-                    # 낙상 지속 시간 표시 (낙상 감지 중인 경우)
-                    if track_id in fall_states and not fall_states[track_id]['is_saved']:
-                        duration = time.time() - fall_states[track_id]['start_time']
-                        duration_text = f"낙상 지속: {duration:.1f}초"
-                        frame = cv2.putText(frame, duration_text, (x1 + 5, y1 + 35), 
-                                          cv2.FONT_HERSHEY_COMPLEX, 0.4, (255, 0, 0), 1)
-                except (ValueError, TypeError, IndexError) as e:
-                    print(f"트랙 시각화 오류: {e}")
+                    if action_name == 'pending..':
+                        continue # pending 상태는 그리지 않음
+
+                    # 현재 프레임에서 업데이트된 트랙만 그리기 (매우 중요!)
+                    if track.time_since_update != 0:
+                        continue
+
+                    try:
+                        if len(track.keypoints_list) > 0:
+                            current_skeleton_color = (255, 0, 0) if action_name == 'Fall Down' else (0, 255, 0)
+                            frame_to_draw_on = draw_single(frame_to_draw_on, track.keypoints_list[-1], skeleton_color=current_skeleton_color) 
+                        
+                        x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                        # cx, cy = int(center[0]), int(center[1]) # 현재 사용 안함
+                        font_face = cv2.FONT_HERSHEY_SIMPLEX; font_scale = 0.5; font_thickness = 1
+                        text_color_on_bg = (255, 255, 255) # White text
+                        
+                        cv2.rectangle(frame_to_draw_on, (x1, y1), (x2, y2), clr, 1) 
+                        text_content = action
+                        (text_w, text_h), baseline = cv2.getTextSize(text_content, font_face, font_scale, font_thickness)
+                        bg_y1_rect = max(0, y1 - text_h - baseline)
+                        cv2.rectangle(frame_to_draw_on, (x1, bg_y1_rect), (x1 + text_w, y1), clr, cv2.FILLED) 
+                        cv2.putText(frame_to_draw_on, text_content, (x1, y1 - baseline), font_face, font_scale, text_color_on_bg, font_thickness)
+                    except (ValueError, TypeError, IndexError) as e:
+                        print(f"트랙 시각화 오류: {e}")
             
-            # 현재 프레임에 없는 트랙 ID 제거 (더 이상 감지되지 않는 객체)
-            for track_id in list(fall_states.keys()):
-                if track_id not in active_tracks:
-                    del fall_states[track_id]
+            # 현재 프레임에 없는 트랙 ID의 fall_states 제거
+            for track_id_key in list(fall_states.keys()): 
+                if track_id_key not in active_tracks:
+                    del fall_states[track_id_key]
             
-            # 프레임 크기 조정 및 FPS 표시
-            frame = cv2.resize(frame, (0, 0), fx=2., fy=2.)
-            frame = cv2.putText(frame, '%d, FPS: %f' % (f, 1.0 / (time.time() - fps_time)),
+            frame_to_draw_on = cv2.resize(frame_to_draw_on, (0, 0), fx=2., fy=2.)
+            frame_to_draw_on = cv2.putText(frame_to_draw_on, '%d, FPS: %f' % (f, 1.0 / (time.time() - fps_time)),
                             (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
             fps_time = time.time()
             
-            # RGB로 변환 (웹 스트리밍용)
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            final_frame_bgr = cv2.cvtColor(frame_to_draw_on, cv2.COLOR_RGB2BGR)
             
-            # 프레임 저장 (스레드 안전)
             with frame_lock:
-                global_frame = frame.copy()
+                global_frame = final_frame_bgr.copy()
             
-            # 프레임 레이트 제어
             time.sleep(0.01)
         
         # 리소스 정리
