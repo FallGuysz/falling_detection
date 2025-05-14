@@ -229,9 +229,20 @@ def process_video(camera_source, device='cuda'):
                         continue
 
                     try:
+                        # 값 검증 추가
+                        if bbox is None or not np.all(np.isfinite(bbox)):
+                            print(f"오류: 트랙 ID {track_id}의 bbox에 유효하지 않은 값 포함: {bbox}")
+                            continue # 이 트랙 그리기를 건너뜀
+
                         if len(track.keypoints_list) > 0:
-                            current_skeleton_color = (255, 0, 0) if action_name == 'Fall Down' else (0, 255, 0)
-                            frame_to_draw_on = draw_single(frame_to_draw_on, track.keypoints_list[-1], skeleton_color=current_skeleton_color) 
+                            keypoints_to_draw = track.keypoints_list[-1]
+                            if keypoints_to_draw is None or not np.all(np.isfinite(keypoints_to_draw)):
+                                print(f"오류: 트랙 ID {track_id}의 keypoints_list에 유효하지 않은 값 포함: {keypoints_to_draw}")
+                                # 키포인트가 유효하지 않으면 스켈레톤 그리기를 건너뛸 수 있지만, bbox는 그릴 수 있음
+                                # 여기서는 일단 스켈레톤 그리기를 시도하지 않도록 플래그 설정 또는 처리 필요
+                            else:
+                                current_skeleton_color = (255, 0, 0) if action_name == 'Fall Down' else (0, 255, 0)
+                                frame_to_draw_on = draw_single(frame_to_draw_on, keypoints_to_draw, skeleton_color=current_skeleton_color)
                         
                         x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
                         # cx, cy = int(center[0]), int(center[1]) # 현재 사용 안함
